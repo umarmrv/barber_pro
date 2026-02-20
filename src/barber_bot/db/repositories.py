@@ -483,6 +483,34 @@ class Repository:
             include_statuses=include_statuses,
         )
 
+    async def list_monitoring_bookings_detailed(
+        self,
+        tz_name: str,
+        *,
+        days: int = 14,
+        include_statuses: Sequence[str] = (
+            BookingStatus.CONFIRMED.value,
+            BookingStatus.BLOCKED.value,
+            BookingStatus.CANCELLED.value,
+        ),
+    ) -> list[TodayBookingDetailed]:
+        now_local = datetime.now(ZoneInfo(tz_name))
+        local_today = now_local.date()
+        day_start_utc, _ = self._local_day_bounds_utc(tz_name, local_today)
+
+        range_end_local = datetime.combine(
+            local_today + timedelta(days=days + 1),
+            datetime.min.time(),
+            ZoneInfo(tz_name),
+        )
+        range_end_utc = range_end_local.astimezone(UTC)
+
+        return await self.list_bookings_detailed_for_range(
+            starts_from_utc=day_start_utc,
+            starts_to_utc=range_end_utc,
+            include_statuses=include_statuses,
+        )
+
     async def list_bookings_detailed_for_range(
         self,
         *,

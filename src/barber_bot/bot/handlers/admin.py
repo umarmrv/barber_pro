@@ -34,7 +34,7 @@ from barber_bot.bot.states import AdminStates
 from barber_bot.bot.utils import get_client_context, get_client_from_user
 from barber_bot.container import AppContainer
 from barber_bot.db.models import WorkShift
-from barber_bot.db.repositories import Repository
+from barber_bot.db.repositories import Repository, TodayBookingDetailed
 from barber_bot.i18n import tr
 from barber_bot.services.booking import BookingWindow, format_booking_local, validate_booking_window
 from barber_bot.services.drafts import get_draft, save_draft
@@ -280,44 +280,113 @@ async def _show_admin_menu(message: Message, locale: str) -> None:
     await message.answer(_next_step(locale, "next_step_admin_menu"))
 
 
+def _booking_username(booking: TodayBookingDetailed) -> str:
+    if booking.client_tg_username:
+        return f"@{booking.client_tg_username}"
+    if booking.client_tg_user_id:
+        return str(booking.client_tg_user_id)
+    return "-"
+
+
+def _booking_service_name(locale: str, booking: TodayBookingDetailed) -> str:
+    if locale == "ru":
+        return booking.service_name_ru or "-"
+    return booking.service_name_uz or "-"
+
+
+def _booking_status(locale: str, status: str) -> str:
+    key = f"booking_status_{status}"
+    value = tr(locale, key)
+    return status if value == key else value
+
+
+def _booking_detail_row(
+    *,
+    locale: str,
+    booking: TodayBookingDetailed,
+    tz_name: str,
+    with_date: bool,
+) -> str:
+    fmt = "%d.%m %H:%M" if with_date else "%H:%M"
+    local_time = booking.starts_at_utc.astimezone(ZoneInfo(tz_name)).strftime(fmt)
+    return tr(
+        locale,
+        "admin_today_row",
+        booking_id=booking.booking_id,
+        time=local_time,
+        status=_booking_status(locale, booking.status),
+        barber=booking.barber_name or "-",
+        service=_booking_service_name(locale, booking),
+        username=_booking_username(booking),
+        phone=booking.client_phone_e164 or "-",
+    )
+
+
+def _chunk_booking_rows(rows: list[str], *, max_chars: int = 3500) -> list[str]:
+    if not rows:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+    for row in rows:
+        candidate = row if not current else f"{current}\n\n{row}"
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = row
+            continue
+        current = candidate
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _answer_booking_rows(
+    *,
+    message: Message,
+    locale: str,
+    title_key: str,
+    rows: list[str],
+    reply_markup=None,
+) -> None:
+    chunks = _chunk_booking_rows(rows)
+    if not chunks:
+        return
+
+    first_text = tr(locale, title_key, rows=chunks[0])
+    if reply_markup is None:
+        await message.answer(first_text)
+    else:
+        await message.answer(first_text, reply_markup=reply_markup)
+
+    for chunk in chunks[1:]:
+        await message.answer(chunk)
+
+
 async def _show_today_bookings(message: Message, repo: Repository, container: AppContainer, locale: str) -> None:
-    bookings = await repo.list_today_bookings_detailed(container.settings.salon_timezone)
+    bookings = await repo.list_monitoring_bookings_detailed(
+        container.settings.salon_timezone,
+        days=container.settings.booking_max_days,
+    )
     if not bookings:
         await message.answer(tr(locale, "admin_today_empty"), reply_markup=admin_back_menu_keyboard(locale))
         await message.answer(_next_step(locale, "next_step_admin_menu"))
         return
 
-    rows: list[str] = []
-    salon_tz = ZoneInfo(container.settings.salon_timezone)
-    for booking in bookings:
-        start_local = booking.starts_at_utc.astimezone(salon_tz).strftime("%H:%M")
-        service_name = "-"
-        if locale == "ru":
-            service_name = booking.service_name_ru or "-"
-        else:
-            service_name = booking.service_name_uz or "-"
-        username = "-"
-        if booking.client_tg_username:
-            username = f"@{booking.client_tg_username}"
-        elif booking.client_tg_user_id:
-            username = str(booking.client_tg_user_id)
-
-        rows.append(
-            tr(
-                locale,
-                "admin_today_row",
-                booking_id=booking.booking_id,
-                time=start_local,
-                status=booking.status,
-                barber=booking.barber_name or "-",
-                service=service_name,
-                username=username,
-                phone=booking.client_phone_e164 or "-",
-            )
+    rows = [
+        _booking_detail_row(
+            locale=locale,
+            booking=booking,
+            tz_name=container.settings.salon_timezone,
+            with_date=True,
         )
-
-    await message.answer(
-        tr(locale, "admin_today", rows="\n".join(rows)),
+        for booking in bookings
+    ]
+    await _answer_booking_rows(
+        message=message,
+        locale=locale,
+        title_key="admin_today",
+        rows=rows,
         reply_markup=admin_back_menu_keyboard(locale),
     )
     await message.answer(_next_step(locale, "next_step_back_menu"))
@@ -410,16 +479,28 @@ async def _show_service_details(message: Message, repo: Repository, locale: str,
 
 def _booking_label_for_delete(
     *,
+    locale: str,
     booking_id: int,
     starts_at_utc: datetime,
     tz_name: str,
-    username: str | None,
+    status: str,
+    barber: str | None,
+    service: str | None,
+    username: str,
     phone: str | None,
 ) -> str:
     local_time = starts_at_utc.astimezone(ZoneInfo(tz_name)).strftime("%d.%m %H:%M")
-    name = f"@{username}" if username else "-"
-    phone_text = phone or "-"
-    return f"#{booking_id} {local_time} | {name} | {phone_text}"
+    client = username if username != "-" else (phone or "-")
+    label = (
+        f"#{booking_id} {local_time} | "
+        f"{barber or '-'} | "
+        f"{service or '-'} | "
+        f"{client} | "
+        f"{_booking_status(locale, status)}"
+    )
+    if len(label) > 64:
+        return f"{label[:61]}..."
+    return label
 
 
 async def _show_admin_delete_booking_list(
@@ -428,7 +509,7 @@ async def _show_admin_delete_booking_list(
     container: AppContainer,
     locale: str,
 ) -> None:
-    bookings = await repo.list_upcoming_bookings_detailed(
+    bookings = await repo.list_monitoring_bookings_detailed(
         container.settings.salon_timezone,
         days=container.settings.booking_max_days,
     )
@@ -437,14 +518,34 @@ async def _show_admin_delete_booking_list(
         await message.answer(_next_step(locale, "next_step_back_menu"))
         return
 
+    detail_rows = [
+        _booking_detail_row(
+            locale=locale,
+            booking=row,
+            tz_name=container.settings.salon_timezone,
+            with_date=True,
+        )
+        for row in bookings
+    ]
+    await _answer_booking_rows(
+        message=message,
+        locale=locale,
+        title_key="admin_booking_delete_details",
+        rows=detail_rows,
+    )
+
     labels = [
         (
             row.booking_id,
             _booking_label_for_delete(
+                locale=locale,
                 booking_id=row.booking_id,
                 starts_at_utc=row.starts_at_utc,
                 tz_name=container.settings.salon_timezone,
-                username=row.client_tg_username,
+                status=row.status,
+                barber=row.barber_name,
+                service=_booking_service_name(locale, row),
+                username=_booking_username(row),
                 phone=row.client_phone_e164,
             ),
         )

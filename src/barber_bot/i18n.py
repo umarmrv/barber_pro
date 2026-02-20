@@ -35,8 +35,8 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/admin_service_toggle <service_id> <on|off>\n"
             "/admin_barber_toggle <barber_id> <on|off>"
         ),
-        "admin_today": "Записи на сегодня:\n{rows}",
-        "admin_today_empty": "На сегодня записей нет.",
+        "admin_today": "Записи (сегодня + ближайшие дни):\n{rows}",
+        "admin_today_empty": "Записей на сегодня и ближайшие дни нет.",
         "admin_today_row": (
             "#{booking_id} {time} {status}\n"
             "Мастер: {barber}\n"
@@ -44,6 +44,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Клиент: {username}\n"
             "Телефон: {phone}"
         ),
+        "booking_status_confirmed": "подтверждена",
+        "booking_status_blocked": "блок",
+        "booking_status_cancelled": "отменена",
         "admin_done": "Готово.",
         "bad_admin_args": "Неверные аргументы команды.",
         "admin_menu_title": "Админ-панель",
@@ -103,6 +106,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "admin_booking_guest_no_reminders": (
             "У клиента нет Telegram-профиля. Напоминания клиенту в Telegram не будут отправлены."
         ),
+        "admin_booking_delete_details": "Детали записей:\n{rows}",
         "admin_booking_delete_choose": "Выберите запись для удаления:",
         "admin_booking_delete_confirm": "Точно удалить запись #{booking_id}?",
         "admin_booking_deleted": "Запись удалена.",
@@ -171,8 +175,8 @@ MESSAGES: dict[str, dict[str, str]] = {
             "/admin_service_toggle <service_id> <on|off>\n"
             "/admin_barber_toggle <barber_id> <on|off>"
         ),
-        "admin_today": "Bugungi yozuvlar:\n{rows}",
-        "admin_today_empty": "Bugun yozuvlar yo'q.",
+        "admin_today": "Yozuvlar (bugun + yaqin kunlar):\n{rows}",
+        "admin_today_empty": "Bugun va yaqin kunlarda yozuvlar yo'q.",
         "admin_today_row": (
             "#{booking_id} {time} {status}\n"
             "Usta: {barber}\n"
@@ -180,6 +184,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Mijoz: {username}\n"
             "Telefon: {phone}"
         ),
+        "booking_status_confirmed": "tasdiqlangan",
+        "booking_status_blocked": "bandlangan",
+        "booking_status_cancelled": "bekor qilingan",
         "admin_done": "Bajarildi.",
         "bad_admin_args": "Buyruq argumentlari noto'g'ri.",
         "admin_menu_title": "Admin panel",
@@ -239,6 +246,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "admin_booking_guest_no_reminders": (
             "Mijozda Telegram profil yo'q. Telegram eslatmalari yuborilmaydi."
         ),
+        "admin_booking_delete_details": "Yozuv tafsilotlari:\n{rows}",
         "admin_booking_delete_choose": "O'chirish uchun yozuvni tanlang:",
         "admin_booking_delete_confirm": "#{booking_id} yozuvini o'chirishni tasdiqlaysizmi?",
         "admin_booking_deleted": "Yozuv o'chirildi.",

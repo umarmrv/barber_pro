@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import BotCommand, Update
 from fastapi import FastAPI, Header, HTTPException, Request
 from redis.asyncio import Redis
@@ -86,14 +87,26 @@ def create_app() -> FastAPI:
             await create_schema(engine)
 
         if not settings.skip_bot_api_calls:
-            await bot.set_my_commands(_commands())
+            try:
+                await bot.set_my_commands(_commands())
+            except TelegramAPIError:
+                logger.exception("Failed to set bot commands")
+
             if settings.webhook_url:
-                await _configure_telegram_webhook(
-                    bot,
-                    settings,
-                    drop_pending_updates=False,
-                )
-                logger.info("Webhook configured by api-service")
+                try:
+                    await _configure_telegram_webhook(
+                        bot,
+                        settings,
+                        drop_pending_updates=False,
+                    )
+                    logger.info("Webhook configured by api-service")
+                except TelegramRetryAfter as exc:
+                    logger.warning(
+                        "Webhook setup rate-limited by Telegram, retry_after=%s sec",
+                        exc.retry_after,
+                    )
+                except TelegramAPIError:
+                    logger.exception("Failed to configure webhook on startup")
             else:
                 logger.warning("WEBHOOK_URL is empty. Telegram webhook setup skipped")
 
