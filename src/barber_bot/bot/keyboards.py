@@ -101,6 +101,9 @@ _ADMIN_LABELS: dict[str, dict[str, str]] = {
         "confirm_booking": "Подтвердить запись",
         "choose": "Выбрать",
         "no_slots_back": "Выбрать другого мастера",
+        "stats_horizon": "Сегодня + ближайшие дни",
+        "stats_week": "Статистика за 7 дней",
+        "stats_date": "Статистика по дате",
     },
     "uz": {
         "barbers": "Sartaroshlar",
@@ -132,6 +135,9 @@ _ADMIN_LABELS: dict[str, dict[str, str]] = {
         "confirm_booking": "Yozuvni tasdiqlash",
         "choose": "Tanlash",
         "no_slots_back": "Boshqa ustani tanlash",
+        "stats_horizon": "Bugun + yaqin kunlar",
+        "stats_week": "7 kun statistikasi",
+        "stats_date": "Sana bo'yicha statistika",
     },
 }
 
@@ -161,6 +167,16 @@ def admin_main_keyboard(locale: str) -> InlineKeyboardMarkup:
     builder.button(text=_al(locale, "booking_delete"), callback_data="admin:booking:delete:list")
     builder.button(text=_al(locale, "barbers"), callback_data="admin:barber:list")
     builder.button(text=_al(locale, "services"), callback_data="admin:service:list")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_booking_stats_menu_keyboard(locale: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=_al(locale, "stats_horizon"), callback_data="admin:booking:stats:horizon")
+    builder.button(text=_al(locale, "stats_week"), callback_data="admin:booking:stats:week")
+    builder.button(text=_al(locale, "stats_date"), callback_data="admin:booking:stats:date")
+    builder.button(text=_al(locale, "back_menu"), callback_data="admin:menu")
     builder.adjust(1)
     return builder.as_markup()
 

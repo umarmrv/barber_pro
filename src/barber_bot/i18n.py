@@ -106,6 +106,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "admin_booking_guest_no_reminders": (
             "У клиента нет Telegram-профиля. Напоминания клиенту в Telegram не будут отправлены."
         ),
+        "admin_booking_stats_choose": "Выберите тип статистики:",
+        "admin_booking_stats_enter_date": "Введите дату в формате YYYY-MM-DD (например, 2026-02-20):",
+        "admin_booking_stats_invalid_date": "Неверная дата. Используйте формат YYYY-MM-DD.",
+        "admin_booking_stats_summary": (
+            "Статистика за период {from_date} - {to_date}:\n"
+            "Всего записей: {total}\n"
+            "Подтверждено: {confirmed}\n"
+            "Отменено: {cancelled}\n"
+            "Блокировок: {blocked}"
+        ),
+        "admin_booking_stats_rows": "Детальные записи за период:\n{rows}",
+        "admin_booking_stats_empty": "За период {from_date} - {to_date} записей нет.",
         "admin_booking_delete_details": "Детали записей:\n{rows}",
         "admin_booking_delete_choose": "Выберите запись для удаления:",
         "admin_booking_delete_confirm": "Точно удалить запись #{booking_id}?",
@@ -137,6 +149,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "next_step_enter_phone": "введите телефон клиента в формате +998....",
         "next_step_delete_pick": "выберите запись, которую нужно удалить.",
         "next_step_back_menu": "вернитесь в меню или продолжите с текущим разделом.",
+        "next_step_choose_stats": "выберите статистику: сегодня, неделя или конкретная дата.",
+        "next_step_enter_stats_date": "введите дату в формате YYYY-MM-DD.",
         "no_available_dates": "Нет доступных дат для выбранного мастера и услуги.",
         "booking_conflict_refresh": "Слот занят. Показал обновленные доступные даты.",
         "reminder_24h": "Напоминание: ваша запись {date_time} (через 24 часа).",
@@ -246,6 +260,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "admin_booking_guest_no_reminders": (
             "Mijozda Telegram profil yo'q. Telegram eslatmalari yuborilmaydi."
         ),
+        "admin_booking_stats_choose": "Statistika turini tanlang:",
+        "admin_booking_stats_enter_date": "Sanani YYYY-MM-DD formatida kiriting (masalan, 2026-02-20):",
+        "admin_booking_stats_invalid_date": "Sana noto'g'ri. YYYY-MM-DD formatidan foydalaning.",
+        "admin_booking_stats_summary": (
+            "{from_date} - {to_date} davri statistikasi:\n"
+            "Jami yozuvlar: {total}\n"
+            "Tasdiqlangan: {confirmed}\n"
+            "Bekor qilingan: {cancelled}\n"
+            "Bandlangan: {blocked}"
+        ),
+        "admin_booking_stats_rows": "Davr bo'yicha batafsil yozuvlar:\n{rows}",
+        "admin_booking_stats_empty": "{from_date} - {to_date} davrida yozuvlar yo'q.",
         "admin_booking_delete_details": "Yozuv tafsilotlari:\n{rows}",
         "admin_booking_delete_choose": "O'chirish uchun yozuvni tanlang:",
         "admin_booking_delete_confirm": "#{booking_id} yozuvini o'chirishni tasdiqlaysizmi?",
@@ -277,6 +303,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "next_step_enter_phone": "mijoz telefonini +998... formatida kiriting.",
         "next_step_delete_pick": "o'chirish kerak bo'lgan yozuvni tanlang.",
         "next_step_back_menu": "menyuga qayting yoki shu bo'limda davom eting.",
+        "next_step_choose_stats": "statistikani tanlang: bugun, hafta yoki aniq sana.",
+        "next_step_enter_stats_date": "sanani YYYY-MM-DD formatida kiriting.",
         "no_available_dates": "Tanlangan usta va xizmat uchun bo'sh sana yo'q.",
         "booking_conflict_refresh": "Vaqt band. Yangilangan bo'sh sanalar ko'rsatildi.",
         "reminder_24h": "Eslatma: yozuvingiz {date_time} (24 soatdan keyin).",

@@ -18,6 +18,7 @@ from barber_bot.bot.keyboards import (
     admin_booking_dates_keyboard,
     admin_booking_delete_confirm_keyboard,
     admin_booking_delete_list_keyboard,
+    admin_booking_stats_menu_keyboard,
     admin_booking_services_keyboard,
     admin_booking_slots_keyboard,
     admin_barber_actions_keyboard,
@@ -363,6 +364,96 @@ async def _answer_booking_rows(
         await message.answer(chunk)
 
 
+def _period_bounds_utc(
+    *,
+    tz_name: str,
+    local_start_day: date,
+    local_end_day_exclusive: date,
+) -> tuple[datetime, datetime]:
+    day_start_local = datetime.combine(local_start_day, datetime.min.time(), ZoneInfo(tz_name))
+    day_end_local = datetime.combine(local_end_day_exclusive, datetime.min.time(), ZoneInfo(tz_name))
+    return day_start_local.astimezone(UTC), day_end_local.astimezone(UTC)
+
+
+def _status_counters(bookings: list[TodayBookingDetailed]) -> tuple[int, int, int]:
+    confirmed = sum(1 for booking in bookings if booking.status == "confirmed")
+    cancelled = sum(1 for booking in bookings if booking.status == "cancelled")
+    blocked = sum(1 for booking in bookings if booking.status == "blocked")
+    return confirmed, cancelled, blocked
+
+
+async def _show_booking_stats_for_period(
+    *,
+    message: Message,
+    repo: Repository,
+    container: AppContainer,
+    locale: str,
+    local_start_day: date,
+    local_end_day_exclusive: date,
+) -> None:
+    starts_from_utc, starts_to_utc = _period_bounds_utc(
+        tz_name=container.settings.salon_timezone,
+        local_start_day=local_start_day,
+        local_end_day_exclusive=local_end_day_exclusive,
+    )
+    bookings = await repo.list_bookings_detailed_for_range(
+        starts_from_utc=starts_from_utc,
+        starts_to_utc=starts_to_utc,
+        include_statuses=("confirmed", "blocked", "cancelled"),
+    )
+
+    from_date = local_start_day.strftime("%d.%m.%Y")
+    to_date = (local_end_day_exclusive - timedelta(days=1)).strftime("%d.%m.%Y")
+
+    if not bookings:
+        await message.answer(
+            tr(locale, "admin_booking_stats_empty", from_date=from_date, to_date=to_date),
+            reply_markup=admin_booking_stats_menu_keyboard(locale),
+        )
+        await message.answer(_next_step(locale, "next_step_choose_stats"))
+        return
+
+    confirmed, cancelled, blocked = _status_counters(bookings)
+    await message.answer(
+        tr(
+            locale,
+            "admin_booking_stats_summary",
+            from_date=from_date,
+            to_date=to_date,
+            total=len(bookings),
+            confirmed=confirmed,
+            cancelled=cancelled,
+            blocked=blocked,
+        ),
+        reply_markup=admin_booking_stats_menu_keyboard(locale),
+    )
+
+    rows = [
+        _booking_detail_row(
+            locale=locale,
+            booking=booking,
+            tz_name=container.settings.salon_timezone,
+            with_date=True,
+        )
+        for booking in bookings
+    ]
+    await _answer_booking_rows(
+        message=message,
+        locale=locale,
+        title_key="admin_booking_stats_rows",
+        rows=rows,
+    )
+    await message.answer(_next_step(locale, "next_step_choose_stats"))
+
+
+async def _show_booking_stats_menu(message: Message, locale: str) -> None:
+    await message.answer(
+        tr(locale, "admin_booking_stats_choose"),
+        reply_markup=admin_booking_stats_menu_keyboard(locale),
+    )
+    await message.answer(_next_step(locale, "next_step_choose_stats"))
+
+
 async def _show_today_bookings(message: Message, repo: Repository, container: AppContainer, locale: str) -> None:
     bookings = await repo.list_monitoring_bookings_detailed(
         container.settings.salon_timezone,
@@ -592,7 +683,6 @@ async def cb_admin_menu(
 
 
 @router.callback_query(F.data == "admin:today")
-@router.callback_query(F.data == "admin:booking:list:today")
 async def cb_admin_today(
     callback: CallbackQuery,
     state: FSMContext,
@@ -606,6 +696,121 @@ async def cb_admin_today(
     await state.set_state(AdminStates.menu)
     await _show_today_bookings(callback.message, repo, container, locale)
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:list:today")
+async def cb_admin_booking_stats_menu(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_menu(callback.message, locale)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:stats:horizon")
+async def cb_admin_booking_stats_horizon(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        local_start_day=today_local,
+        local_end_day_exclusive=today_local + timedelta(days=container.settings.booking_max_days + 1),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:stats:week")
+async def cb_admin_booking_stats_week(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        local_start_day=today_local,
+        local_end_day_exclusive=today_local + timedelta(days=7),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:stats:date")
+async def cb_admin_booking_stats_date(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    await state.set_state(AdminStates.booking_stats_date_input)
+    await callback.message.answer(
+        tr(locale, "admin_booking_stats_enter_date"),
+        reply_markup=admin_back_menu_keyboard(locale),
+    )
+    await callback.message.answer(_next_step(locale, "next_step_enter_stats_date"))
+    await callback.answer()
+
+
+@router.message(AdminStates.booking_stats_date_input)
+async def on_admin_booking_stats_date_input(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    if message.text is None:
+        return
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+
+    try:
+        local_day = date.fromisoformat(message.text.strip())
+    except ValueError:
+        await message.answer(tr(locale, "admin_booking_stats_invalid_date"))
+        await message.answer(_next_step(locale, "next_step_enter_stats_date"))
+        return
+
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_for_period(
+        message=message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        local_start_day=local_day,
+        local_end_day_exclusive=local_day + timedelta(days=1),
+    )
 
 
 @router.callback_query(F.data == "admin:booking:add")

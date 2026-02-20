@@ -15,6 +15,7 @@ class BookingStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     menu = State()
+    booking_stats_date_input = State()
 
     booking_create_phone = State()
     booking_create_choose_client = State()
