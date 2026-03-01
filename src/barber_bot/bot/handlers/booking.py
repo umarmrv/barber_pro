@@ -11,18 +11,20 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from barber_bot.bot.keyboards import (
-    no_slots_back_keyboard,
     barbers_keyboard,
     cancel_keyboard,
+    client_main_reply_keyboard,
+    client_menu_texts,
     confirm_keyboard,
     dates_keyboard,
+    no_slots_back_keyboard,
     services_keyboard,
     slots_keyboard,
 )
 from barber_bot.bot.states import BookingStates, OnboardingStates
 from barber_bot.bot.utils import get_client_context, get_client_from_user, notify_admin_group
 from barber_bot.container import AppContainer
-from barber_bot.db.repositories import Repository
+from barber_bot.db.repositories import Repository, service_name_by_locale
 from barber_bot.i18n import tr
 from barber_bot.services.booking import (
     BookingWindow,
@@ -43,7 +45,7 @@ async def _send_next_step(message: Message, locale: str, step_key: str) -> None:
 async def _prompt_services(message: Message, client_locale: str, repo: Repository) -> None:
     services = await repo.list_active_services()
     if not services:
-        await message.answer("No services configured")
+        await message.answer(tr(client_locale, "no_services_configured"))
         return
     await message.answer(
         tr(client_locale, "choose_service"),
@@ -124,6 +126,16 @@ async def cmd_book(
     await _prompt_services(message, client.locale, repo)
 
 
+@router.message(F.text.in_(client_menu_texts("book")))
+async def menu_book(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    await cmd_book(message, state, repo, container)
+
+
 @router.callback_query(F.data.startswith("svc:"))
 async def cb_service(
     callback: CallbackQuery,
@@ -138,12 +150,12 @@ async def cb_service(
 
     service = await repo.get_service(service_id)
     if service is None or not service.is_active:
-        await callback.answer("Service not found", show_alert=True)
+        await callback.answer(tr(client.locale, "service_not_found"), show_alert=True)
         return
 
     barbers = await repo.list_active_barbers()
     if not barbers:
-        await callback.answer("No active barbers", show_alert=True)
+        await callback.answer(tr(client.locale, "no_active_barbers"), show_alert=True)
         return
 
     await state.update_data(service_id=service_id)
@@ -169,17 +181,17 @@ async def cb_barber(
     state_data = await state.get_data()
     service_id = state_data.get("service_id")
     if not service_id:
-        await callback.answer("Flow expired. Use /book", show_alert=True)
+        await callback.answer(tr(client.locale, "flow_expired_book"), show_alert=True)
         return
     service = await repo.get_service(int(service_id))
     if service is None or not service.is_active:
-        await callback.answer("Service not found", show_alert=True)
+        await callback.answer(tr(client.locale, "service_not_found"), show_alert=True)
         return
 
     barber_id = int(callback.data.split(":", maxsplit=1)[1])
     barber = await repo.get_barber(barber_id)
     if barber is None or not barber.is_active:
-        await callback.answer("Barber not found", show_alert=True)
+        await callback.answer(tr(client.locale, "barber_not_found"), show_alert=True)
         return
 
     days = await _available_days(
@@ -213,7 +225,7 @@ async def cb_back_barbers(
     client = await get_client_from_user(callback.from_user, repo, container)
     barbers = await repo.list_active_barbers()
     if not barbers:
-        await callback.answer("No active barbers", show_alert=True)
+        await callback.answer(tr(client.locale, "no_active_barbers"), show_alert=True)
         return
     await state.set_state(BookingStates.choose_barber)
     await callback.message.answer(
@@ -239,12 +251,12 @@ async def cb_date(
     service_id = data.get("service_id")
     barber_id = data.get("barber_id")
     if not service_id or not barber_id:
-        await callback.answer("Flow expired. Use /book", show_alert=True)
+        await callback.answer(tr(client.locale, "flow_expired_book"), show_alert=True)
         return
 
     service = await repo.get_service(int(service_id))
     if service is None:
-        await callback.answer("Service not found", show_alert=True)
+        await callback.answer(tr(client.locale, "service_not_found"), show_alert=True)
         return
 
     local_day = date.fromisoformat(callback.data.split(":", maxsplit=1)[1])
@@ -312,7 +324,7 @@ async def cb_slot(
     slot_id = callback.data.split(":", maxsplit=1)[1]
     slot_data = slot_map.get(slot_id)
     if slot_data is None:
-        await callback.answer("Slot expired. Re-open date", show_alert=True)
+        await callback.answer(tr(client.locale, "slot_expired_reopen"), show_alert=True)
         return
 
     service_id = int(data["service_id"])
@@ -335,7 +347,7 @@ async def cb_slot(
         "confirm_booking",
         date_time=format_booking_local(start, container.settings.salon_timezone),
     )
-    await callback.message.answer(text, reply_markup=confirm_keyboard(draft_id))
+    await callback.message.answer(text, reply_markup=confirm_keyboard(draft_id, client.locale))
     await _send_next_step(callback.message, client.locale, "next_step_confirm")
     await callback.answer()
 
@@ -351,16 +363,16 @@ async def cb_confirm(
     if callback.from_user is None:
         return
 
+    client = await get_client_from_user(callback.from_user, repo, container)
     draft_id = callback.data.split(":", maxsplit=1)[1]
     payload = await get_draft(container.redis, draft_id)
     if payload is None:
-        await callback.answer("Draft expired. Please restart /book", show_alert=True)
+        await callback.answer(tr(client.locale, "draft_expired_book"), show_alert=True)
         return
     if payload["client_tg_user_id"] != callback.from_user.id:
-        await callback.answer("Forbidden", show_alert=True)
+        await callback.answer(tr(client.locale, "forbidden"), show_alert=True)
         return
 
-    client = await get_client_from_user(callback.from_user, repo, container)
     starts_at_utc = datetime.fromisoformat(payload["starts_at_utc"])
     ends_at_utc = datetime.fromisoformat(payload["ends_at_utc"])
 
@@ -369,7 +381,7 @@ async def cb_confirm(
         max_days=container.settings.booking_max_days,
     )
     if not validate_booking_window(starts_at_utc, datetime.now(UTC), window):
-        await callback.answer("Slot no longer valid", show_alert=True)
+        await callback.answer(tr(client.locale, "slot_no_longer_valid"), show_alert=True)
         return
 
     booking = await repo.create_confirmed_booking(
@@ -422,6 +434,8 @@ async def cb_confirm(
 
 @router.message(Command("my_bookings"))
 @router.message(Command("cancel"))
+@router.message(F.text.in_(client_menu_texts("my_bookings")))
+@router.message(F.text.in_(client_menu_texts("cancel")))
 async def cmd_my_bookings(
     message: Message,
     repo: Repository,
@@ -430,23 +444,37 @@ async def cmd_my_bookings(
     client = await get_client_context(message, repo, container)
     bookings = await repo.list_future_bookings_for_client(client.id)
     if not bookings:
-        await message.answer(tr(client.locale, "no_future_bookings"))
+        await message.answer(
+            tr(client.locale, "no_future_bookings"),
+            reply_markup=client_main_reply_keyboard(client.locale),
+        )
         return
 
-    await message.answer(tr(client.locale, "future_bookings"))
+    await message.answer(
+        tr(client.locale, "future_bookings"),
+        reply_markup=client_main_reply_keyboard(client.locale),
+    )
     for booking in bookings:
         barber = await repo.get_barber(booking.barber_id)
         service = await repo.get_service(booking.service_id) if booking.service_id else None
         service_name = "-"
         if service is not None:
-            service_name = service.name_ru if client.locale == "ru" else service.name_uz
+            service_name = service_name_by_locale(
+                client.locale,
+                name_ru=service.name_ru,
+                name_uz=service.name_uz,
+                name_tj=service.name_tj,
+            )
         start_local = format_booking_local(booking.starts_at_utc, container.settings.salon_timezone)
-        text = (
-            f"#{booking.id} | {start_local}\n"
-            f"Barber: {barber.name if barber else '-'}\n"
-            f"Service: {service_name}"
+        text = tr(
+            client.locale,
+            "booking_row",
+            booking_id=booking.id,
+            date_time=start_local,
+            barber=barber.name if barber else "-",
+            service=service_name,
         )
-        await message.answer(text, reply_markup=cancel_keyboard(booking.id))
+        await message.answer(text, reply_markup=cancel_keyboard(booking.id, client.locale))
     await _send_next_step(message, client.locale, "next_step_back_menu")
 
 

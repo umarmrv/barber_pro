@@ -60,7 +60,13 @@ async def test_parallel_booking_conflict_postgres() -> None:
             phone_e164="+998901111111",
             locale="ru",
         )
-        service = Service(name_ru="Стрижка", name_uz="Soch", duration_min=30, price_minor=100_000)
+        service = Service(
+            name_ru="Стрижка",
+            name_uz="Soch",
+            name_tj="Мӯйсаргирӣ",
+            duration_min=30,
+            price_minor=100_000,
+        )
         barber = Barber(name="Akmal")
         session.add(client)
         session.add(service)

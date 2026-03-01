@@ -12,23 +12,51 @@ from redis.asyncio import Redis
 from barber_bot.bot.factory import create_bot_and_dispatcher
 from barber_bot.config import Settings, get_settings
 from barber_bot.container import AppContainer
-from barber_bot.db import Repository, create_engine_and_sessionmaker, create_schema
+from barber_bot.db import (
+    Repository,
+    create_engine_and_sessionmaker,
+    create_schema,
+    ensure_runtime_compatibility,
+)
 from barber_bot.logging_utils import setup_logging
 from barber_bot.services.idempotency import consume_update_id
 
 logger = logging.getLogger(__name__)
 
 
-def _commands() -> list[BotCommand]:
-    return [
-        BotCommand(command="start", description="Start bot"),
-        BotCommand(command="book", description="Book appointment"),
-        BotCommand(command="my_bookings", description="My bookings"),
-        BotCommand(command="cancel", description="Cancel booking"),
-        BotCommand(command="lang", description="Language"),
-        BotCommand(command="help", description="Help"),
-        BotCommand(command="admin", description="Admin commands"),
-    ]
+def _localized_commands() -> dict[str, list[BotCommand]]:
+    return {
+        "ru": [
+            BotCommand(command="start", description="Старт"),
+            BotCommand(command="book", description="Записаться"),
+            BotCommand(command="my_bookings", description="Мои записи"),
+            BotCommand(command="cancel", description="Отменить запись"),
+            BotCommand(command="lang", description="Язык"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="admin", description="Админ-меню"),
+            BotCommand(command="admin_visits", description="Визиты"),
+        ],
+        "uz": [
+            BotCommand(command="start", description="Бошлаш"),
+            BotCommand(command="book", description="Ёзилиш"),
+            BotCommand(command="my_bookings", description="Менинг ёзувларим"),
+            BotCommand(command="cancel", description="Ёзувни бекор қилиш"),
+            BotCommand(command="lang", description="Тил"),
+            BotCommand(command="help", description="Ёрдам"),
+            BotCommand(command="admin", description="Админ меню"),
+            BotCommand(command="admin_visits", description="Ташрифлар"),
+        ],
+        "tj": [
+            BotCommand(command="start", description="Оғоз"),
+            BotCommand(command="book", description="Сабт шудан"),
+            BotCommand(command="my_bookings", description="Сабтҳои ман"),
+            BotCommand(command="cancel", description="Бекор кардани сабт"),
+            BotCommand(command="lang", description="Забон"),
+            BotCommand(command="help", description="Кӯмак"),
+            BotCommand(command="admin", description="Менюи админ"),
+            BotCommand(command="admin_visits", description="Ташрифҳо"),
+        ],
+    }
 
 
 def _expected_admin_secret(settings: Settings) -> str:
@@ -85,10 +113,16 @@ def create_app() -> FastAPI:
     async def on_startup() -> None:
         if settings.auto_create_schema:
             await create_schema(engine)
+        await ensure_runtime_compatibility(engine)
 
         if not settings.skip_bot_api_calls:
             try:
-                await bot.set_my_commands(_commands())
+                localized = _localized_commands()
+                await bot.set_my_commands(localized["ru"])
+                await bot.set_my_commands(localized["ru"], language_code="ru")
+                await bot.set_my_commands(localized["uz"], language_code="uz")
+                await bot.set_my_commands(localized["tj"], language_code="tg")
+                await bot.set_my_commands(localized["tj"], language_code="tj")
             except TelegramAPIError:
                 logger.exception("Failed to set bot commands")
 

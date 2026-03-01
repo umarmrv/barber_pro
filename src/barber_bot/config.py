@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     redis_dsn: str = Field(alias="REDIS_DSN")
 
     salon_timezone: str = Field(default="Asia/Tashkent", alias="SALON_TIMEZONE")
-    default_region: str = Field(default="UZ", alias="DEFAULT_REGION")
+    default_region: str = Field(default="TJ", alias="DEFAULT_REGION")
     default_locale: str = Field(default="ru", alias="DEFAULT_LOCALE")
 
     admin_ids_raw: str = Field(default="", alias="ADMIN_IDS")

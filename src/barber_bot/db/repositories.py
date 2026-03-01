@@ -35,16 +35,32 @@ class DueReminder:
 class TodayBookingDetailed:
     booking_id: int
     starts_at_utc: datetime
+    ends_at_utc: datetime
     status: str
     barber_id: int | None
     barber_name: str | None
     service_id: int | None
     service_name_ru: str | None
     service_name_uz: str | None
+    service_name_tj: str | None
     client_id: int | None
     client_tg_user_id: int | None
     client_tg_username: str | None
     client_phone_e164: str | None
+
+
+def service_name_by_locale(
+    locale: str | None,
+    *,
+    name_ru: str | None,
+    name_uz: str | None,
+    name_tj: str | None,
+) -> str:
+    if locale == "uz":
+        return name_uz or name_ru or name_tj or "-"
+    if locale == "tj":
+        return name_tj or name_ru or name_uz or "-"
+    return name_ru or name_uz or name_tj or "-"
 
 
 class Repository:
@@ -212,7 +228,13 @@ class Repository:
             select(Booking.starts_at_utc, Booking.ends_at_utc)
             .where(
                 Booking.barber_id == barber_id,
-                Booking.status.in_([BookingStatus.CONFIRMED.value, BookingStatus.BLOCKED.value]),
+                Booking.status.in_(
+                    [
+                        BookingStatus.CONFIRMED.value,
+                        BookingStatus.COMPLETED.value,
+                        BookingStatus.BLOCKED.value,
+                    ]
+                ),
                 Booking.starts_at_utc < day_end_utc,
                 Booking.ends_at_utc > day_start_utc,
             )
@@ -237,7 +259,13 @@ class Repository:
             select(Booking)
             .where(
                 Booking.barber_id == barber_id,
-                Booking.status.in_([BookingStatus.CONFIRMED.value, BookingStatus.BLOCKED.value]),
+                Booking.status.in_(
+                    [
+                        BookingStatus.CONFIRMED.value,
+                        BookingStatus.COMPLETED.value,
+                        BookingStatus.BLOCKED.value,
+                    ]
+                ),
                 Booking.starts_at_utc < ends_at_utc,
                 Booking.ends_at_utc > starts_at_utc,
             )
@@ -328,7 +356,13 @@ class Repository:
             select(Booking)
             .where(
                 Booking.barber_id == barber_id,
-                Booking.status.in_([BookingStatus.CONFIRMED.value, BookingStatus.BLOCKED.value]),
+                Booking.status.in_(
+                    [
+                        BookingStatus.CONFIRMED.value,
+                        BookingStatus.COMPLETED.value,
+                        BookingStatus.BLOCKED.value,
+                    ]
+                ),
                 Booking.starts_at_utc < ends_at_utc,
                 Booking.ends_at_utc > starts_at_utc,
             )
@@ -413,6 +447,82 @@ class Repository:
         )
         return result.scalar_one_or_none()
 
+    async def get_booking(self, booking_id: int) -> Booking | None:
+        return await self.session.get(Booking, booking_id)
+
+    async def get_booking_detailed(self, booking_id: int) -> TodayBookingDetailed | None:
+        result = await self.session.execute(
+            select(
+                Booking.id,
+                Booking.starts_at_utc,
+                Booking.ends_at_utc,
+                Booking.status,
+                Booking.barber_id,
+                Barber.name,
+                Booking.service_id,
+                Service.name_ru,
+                Service.name_uz,
+                Service.name_tj,
+                Booking.client_id,
+                Client.tg_user_id,
+                Client.tg_username,
+                Client.phone_e164,
+            )
+            .outerjoin(Barber, Barber.id == Booking.barber_id)
+            .outerjoin(Service, Service.id == Booking.service_id)
+            .outerjoin(Client, Client.id == Booking.client_id)
+            .where(Booking.id == booking_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return TodayBookingDetailed(*row)
+
+    async def set_booking_status(
+        self,
+        *,
+        booking_id: int,
+        new_status: str,
+        reason: str,
+        actor_tg_user_id: int | None,
+    ) -> Booking | None:
+        booking = await self.session.get(Booking, booking_id)
+        if booking is None:
+            return None
+
+        old_status = booking.status
+        if old_status == new_status:
+            return booking
+
+        if (
+            old_status == BookingStatus.CONFIRMED.value
+            and new_status == BookingStatus.COMPLETED.value
+        ):
+            event_type = "service_completed"
+        elif (
+            old_status == BookingStatus.COMPLETED.value
+            and new_status == BookingStatus.CONFIRMED.value
+        ):
+            event_type = "service_completion_reverted"
+        else:
+            return None
+
+        booking.status = new_status
+        self.session.add(
+            BookingEvent(
+                booking_id=booking.id,
+                event_type=event_type,
+                payload_json={
+                    "from_status": old_status,
+                    "to_status": new_status,
+                    "reason": reason,
+                    "actor_tg_user_id": actor_tg_user_id,
+                },
+            )
+        )
+        await self.session.flush()
+        return booking
+
     async def cancel_booking(self, booking: Booking, reason: str = "client_cancelled") -> None:
         booking.status = BookingStatus.CANCELLED.value
         booking.cancelled_at_utc = datetime.now(UTC)
@@ -450,6 +560,7 @@ class Repository:
                 Booking.status.in_(
                     [
                         BookingStatus.CONFIRMED.value,
+                        BookingStatus.COMPLETED.value,
                         BookingStatus.BLOCKED.value,
                         BookingStatus.CANCELLED.value,
                     ]
@@ -471,6 +582,7 @@ class Repository:
         tz_name: str,
         include_statuses: Sequence[str] = (
             BookingStatus.CONFIRMED.value,
+            BookingStatus.COMPLETED.value,
             BookingStatus.BLOCKED.value,
             BookingStatus.CANCELLED.value,
         ),
@@ -490,6 +602,7 @@ class Repository:
         days: int = 14,
         include_statuses: Sequence[str] = (
             BookingStatus.CONFIRMED.value,
+            BookingStatus.COMPLETED.value,
             BookingStatus.BLOCKED.value,
             BookingStatus.CANCELLED.value,
         ),
@@ -523,12 +636,14 @@ class Repository:
             select(
                 Booking.id,
                 Booking.starts_at_utc,
+                Booking.ends_at_utc,
                 Booking.status,
                 Booking.barber_id,
                 Barber.name,
                 Booking.service_id,
                 Service.name_ru,
                 Service.name_uz,
+                Service.name_tj,
                 Booking.client_id,
                 Client.tg_user_id,
                 Client.tg_username,
@@ -549,6 +664,26 @@ class Repository:
         result = await self.session.execute(query)
         return [TodayBookingDetailed(*row) for row in result.all()]
 
+    async def sum_cash_for_range(
+        self,
+        *,
+        starts_from_utc: datetime,
+        starts_to_utc: datetime,
+        include_statuses: Sequence[str] = (BookingStatus.COMPLETED.value,),
+    ) -> int:
+        result = await self.session.execute(
+            select(func.coalesce(func.sum(Service.price_minor), 0))
+            .select_from(Booking)
+            .outerjoin(Service, Service.id == Booking.service_id)
+            .where(
+                Booking.starts_at_utc >= starts_from_utc,
+                Booking.starts_at_utc < starts_to_utc,
+                Booking.status.in_(list(include_statuses)),
+            )
+        )
+        value = result.scalar_one_or_none()
+        return int(value or 0)
+
     async def list_upcoming_bookings_detailed(
         self,
         tz_name: str,
@@ -556,6 +691,7 @@ class Repository:
         days: int = 14,
         include_statuses: Sequence[str] = (
             BookingStatus.CONFIRMED.value,
+            BookingStatus.COMPLETED.value,
             BookingStatus.BLOCKED.value,
             BookingStatus.CANCELLED.value,
         ),
@@ -570,14 +706,26 @@ class Repository:
             limit=limit,
         )
 
+    async def list_today_bookings_for_visits(self, tz_name: str) -> list[TodayBookingDetailed]:
+        return await self.list_today_bookings_detailed(
+            tz_name,
+            include_statuses=(
+                BookingStatus.CONFIRMED.value,
+                BookingStatus.COMPLETED.value,
+                BookingStatus.BLOCKED.value,
+                BookingStatus.CANCELLED.value,
+            ),
+        )
+
     async def upsert_service(
-        self, *, duration_min: int, price_minor: int, name_ru: str, name_uz: str
+        self, *, duration_min: int, price_minor: int, name_ru: str, name_uz: str, name_tj: str
     ) -> Service:
         service = Service(
             duration_min=duration_min,
             price_minor=price_minor,
             name_ru=name_ru,
             name_uz=name_uz,
+            name_tj=name_tj,
             is_active=True,
         )
         self.session.add(service)
@@ -585,13 +733,14 @@ class Repository:
         return service
 
     async def create_service(
-        self, *, duration_min: int, price_minor: int, name_ru: str, name_uz: str
+        self, *, duration_min: int, price_minor: int, name_ru: str, name_uz: str, name_tj: str
     ) -> Service:
         return await self.upsert_service(
             duration_min=duration_min,
             price_minor=price_minor,
             name_ru=name_ru,
             name_uz=name_uz,
+            name_tj=name_tj,
         )
 
     async def update_service(
@@ -602,6 +751,7 @@ class Repository:
         price_minor: int,
         name_ru: str,
         name_uz: str,
+        name_tj: str,
     ) -> bool:
         service = await self.session.get(Service, service_id)
         if not service:
@@ -610,6 +760,7 @@ class Repository:
         service.price_minor = price_minor
         service.name_ru = name_ru
         service.name_uz = name_uz
+        service.name_tj = name_tj
         await self.session.flush()
         return True
 
@@ -678,6 +829,8 @@ class Repository:
         booking = await self.session.get(Booking, booking_id)
         if not booking:
             return False
+        if booking.status == BookingStatus.COMPLETED.value:
+            return False
         await self.session.delete(booking)
         await self.session.flush()
         return True
@@ -690,6 +843,10 @@ class Repository:
         start_local_time: time,
         end_local_time: time,
     ) -> WorkShift | None:
+        if weekday == 7:
+            weekday = 6
+        if weekday < 0 or weekday > 6:
+            return None
         if start_local_time >= end_local_time:
             return None
 

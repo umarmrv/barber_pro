@@ -78,3 +78,35 @@ async def test_create_work_shift_accepts_non_overlapping_interval() -> None:
     assert shift.barber_id == 1
     assert shift.weekday == 1
     assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_work_shift_normalizes_legacy_sunday_weekday() -> None:
+    session = _FakeSession(overlap_id=None)
+    repo = Repository(session)
+
+    shift = await repo.create_work_shift(
+        barber_id=1,
+        weekday=7,
+        start_local_time=time(10, 0),
+        end_local_time=time(13, 0),
+    )
+
+    assert shift is not None
+    assert shift.weekday == 6
+
+
+@pytest.mark.asyncio
+async def test_create_work_shift_rejects_out_of_range_weekday() -> None:
+    session = _FakeSession(overlap_id=None)
+    repo = Repository(session)
+
+    shift = await repo.create_work_shift(
+        barber_id=1,
+        weekday=8,
+        start_local_time=time(10, 0),
+        end_local_time=time(13, 0),
+    )
+
+    assert shift is None
+    assert session.added == []

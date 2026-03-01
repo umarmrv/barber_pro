@@ -9,18 +9,19 @@ Production-oriented Telegram booking bot for a single barber shop branch.
 - Docker Compose + Nginx
 
 ## Features
-- RU/UZ language support
+- RU/UZ/TJ language support (`uz` uses Cyrillic text)
 - Booking flow: service -> barber -> date -> slot -> confirm
 - Booking constraints: from +1 hour to +14 days
 - Cancellations allowed until 2 hours before start
 - Reminder jobs (24h, 2h)
-- Admin commands in Telegram
+- Admin commands in Telegram, including visit confirmation by selected date
 - Webhook secret verification
 - Admin API secret for operational endpoints
 - Update idempotency via Redis
 
 ## Quick start
 1. Copy `.env.example` to `.env` and fill values.
+   Default phone parsing region is `TJ`, and example phone prompts use `+992...`.
 2. Run:
    ```bash
    docker compose -f deploy/docker-compose.yml up --build

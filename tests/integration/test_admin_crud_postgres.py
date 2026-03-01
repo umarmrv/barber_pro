@@ -32,12 +32,14 @@ async def test_soft_delete_lists_and_shift_overlap_postgres() -> None:
             price_minor=100_000,
             name_ru="Стрижка актив",
             name_uz="Faol xizmat",
+            name_tj="Хизмати фаъол",
         )
         archived_service = await repo.create_service(
             duration_min=45,
             price_minor=150_000,
             name_ru="Стрижка архив",
             name_uz="Arxiv xizmat",
+            name_tj="Хизмати бойгонӣ",
         )
 
         await repo.archive_barber(archived_barber.id)

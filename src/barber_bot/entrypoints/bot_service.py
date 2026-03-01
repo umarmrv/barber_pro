@@ -12,23 +12,53 @@ from barber_bot.logging_utils import setup_logging
 logger = logging.getLogger(__name__)
 
 
+def _localized_commands() -> dict[str, list[BotCommand]]:
+    return {
+        "ru": [
+            BotCommand(command="start", description="Старт"),
+            BotCommand(command="book", description="Записаться"),
+            BotCommand(command="my_bookings", description="Мои записи"),
+            BotCommand(command="cancel", description="Отменить запись"),
+            BotCommand(command="lang", description="Язык"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="admin", description="Админ-меню"),
+            BotCommand(command="admin_visits", description="Визиты"),
+        ],
+        "uz": [
+            BotCommand(command="start", description="Бошлаш"),
+            BotCommand(command="book", description="Ёзилиш"),
+            BotCommand(command="my_bookings", description="Менинг ёзувларим"),
+            BotCommand(command="cancel", description="Ёзувни бекор қилиш"),
+            BotCommand(command="lang", description="Тил"),
+            BotCommand(command="help", description="Ёрдам"),
+            BotCommand(command="admin", description="Админ меню"),
+            BotCommand(command="admin_visits", description="Ташрифлар"),
+        ],
+        "tj": [
+            BotCommand(command="start", description="Оғоз"),
+            BotCommand(command="book", description="Сабт шудан"),
+            BotCommand(command="my_bookings", description="Сабтҳои ман"),
+            BotCommand(command="cancel", description="Бекор кардани сабт"),
+            BotCommand(command="lang", description="Забон"),
+            BotCommand(command="help", description="Кӯмак"),
+            BotCommand(command="admin", description="Менюи админ"),
+            BotCommand(command="admin_visits", description="Ташрифҳо"),
+        ],
+    }
+
+
 async def run() -> None:
     setup_logging()
     settings = get_settings()
     bot = Bot(token=settings.bot_token)
 
     if not settings.skip_bot_api_calls:
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Start bot"),
-                BotCommand(command="book", description="Book appointment"),
-                BotCommand(command="my_bookings", description="My bookings"),
-                BotCommand(command="cancel", description="Cancel booking"),
-                BotCommand(command="lang", description="Language"),
-                BotCommand(command="help", description="Help"),
-                BotCommand(command="admin", description="Admin commands"),
-            ]
-        )
+        localized = _localized_commands()
+        await bot.set_my_commands(localized["ru"])
+        await bot.set_my_commands(localized["ru"], language_code="ru")
+        await bot.set_my_commands(localized["uz"], language_code="uz")
+        await bot.set_my_commands(localized["tj"], language_code="tg")
+        await bot.set_my_commands(localized["tj"], language_code="tj")
 
         if settings.webhook_url:
             await bot.set_webhook(

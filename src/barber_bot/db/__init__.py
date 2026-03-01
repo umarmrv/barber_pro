@@ -10,7 +10,7 @@ from barber_bot.db.models import (
     WorkShift,
 )
 from barber_bot.db.repositories import Repository
-from barber_bot.db.session import create_engine_and_sessionmaker, create_schema
+from barber_bot.db.session import create_engine_and_sessionmaker, create_schema, ensure_runtime_compatibility
 
 __all__ = [
     "AdminUser",
@@ -25,4 +25,5 @@ __all__ = [
     "WorkShift",
     "create_engine_and_sessionmaker",
     "create_schema",
+    "ensure_runtime_compatibility",
 ]

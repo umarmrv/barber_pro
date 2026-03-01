@@ -2,7 +2,7 @@
 
 ## 1. Что уже реализовано
 
-1. Telegram-бот для записи в барбершоп (RU/UZ).
+1. Telegram-бот для записи в барбершоп (RU/UZ/TJ, `uz` в кириллице).
 2. Клиентский поток записи: `Услуга -> Мастер -> Доступные даты -> Доступные слоты -> Подтверждение`.
 3. Пользователь видит только реально доступные даты/слоты.
 4. Telegram админ-панель (кнопки + FSM):
@@ -59,6 +59,7 @@ ADMIN_API_SECRET=сильный_секрет_для_admin_api
 POSTGRES_DSN=postgresql+asyncpg://barber:barber@postgres:5432/barber
 REDIS_DSN=redis://redis:6379/0
 SALON_TIMEZONE=Asia/Tashkent
+DEFAULT_REGION=TJ
 SKIP_BOT_API_CALLS=false
 ```
 
@@ -112,6 +113,7 @@ curl -i -X POST http://localhost/telegram/webhook -H 'Content-Type: application/
 - Мастера
 - Услуги
 - Записи сегодня
+- Визиты (с выбором даты)
 
 ### 5.1 Мастера
 
@@ -234,4 +236,3 @@ curl -i -X POST http://localhost/telegram/webhook -H 'Content-Type: application/
 2. После релиза: проверить `/admin` сценарии CRUD и одну тестовую запись.
 3. Ежедневно: мониторить логи `api`, `scheduler`, `bot`.
 4. Еженедельно: тест восстановления из backup Postgres.
-

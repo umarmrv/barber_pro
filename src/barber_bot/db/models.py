@@ -28,6 +28,7 @@ class Base(DeclarativeBase):
 
 class BookingStatus(StrEnum):
     CONFIRMED = "confirmed"
+    COMPLETED = "completed"
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
 
@@ -54,6 +55,7 @@ class Service(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name_ru: Mapped[str] = mapped_column(Text, nullable=False)
     name_uz: Mapped[str] = mapped_column(Text, nullable=False)
+    name_tj: Mapped[str] = mapped_column(Text, nullable=False)
     duration_min: Mapped[int] = mapped_column(Integer, nullable=False)
     price_minor: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))

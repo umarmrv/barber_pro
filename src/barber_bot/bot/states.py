@@ -16,6 +16,7 @@ class BookingStates(StatesGroup):
 class AdminStates(StatesGroup):
     menu = State()
     booking_stats_date_input = State()
+    visit_date_input = State()
 
     booking_create_phone = State()
     booking_create_choose_client = State()
@@ -36,10 +37,12 @@ class AdminStates(StatesGroup):
 
     service_create_ru_name = State()
     service_create_uz_name = State()
+    service_create_tj_name = State()
     service_create_duration = State()
     service_create_price = State()
 
     service_edit_ru_name = State()
     service_edit_uz_name = State()
+    service_edit_tj_name = State()
     service_edit_duration = State()
     service_edit_price = State()

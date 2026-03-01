@@ -7,38 +7,46 @@ from zoneinfo import ZoneInfo
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from barber_bot.bot.keyboards import (
+    admin_menu_texts,
     admin_back_menu_keyboard,
     admin_booking_barbers_keyboard,
     admin_booking_clients_keyboard,
     admin_booking_confirm_keyboard,
+    admin_booking_stats_calendar_keyboard,
     admin_booking_dates_keyboard,
     admin_booking_delete_confirm_keyboard,
     admin_booking_delete_list_keyboard,
     admin_booking_stats_menu_keyboard,
+    admin_booking_stats_result_keyboard,
     admin_booking_services_keyboard,
     admin_booking_slots_keyboard,
+    admin_visit_actions_keyboard,
+    admin_visits_list_keyboard,
     admin_barber_actions_keyboard,
     admin_barbers_keyboard,
     admin_confirm_barber_delete_keyboard,
     admin_confirm_service_delete_keyboard,
     admin_main_keyboard,
+    admin_main_reply_keyboard,
     admin_service_actions_keyboard,
     admin_services_keyboard,
     admin_shift_weekday_keyboard,
     admin_shifts_keyboard,
+    admin_visits_calendar_keyboard,
 )
 from barber_bot.bot.states import AdminStates
 from barber_bot.bot.utils import get_client_context, get_client_from_user
 from barber_bot.container import AppContainer
-from barber_bot.db.models import WorkShift
-from barber_bot.db.repositories import Repository, TodayBookingDetailed
+from barber_bot.db.models import BookingStatus, WorkShift
+from barber_bot.db.repositories import Repository, TodayBookingDetailed, service_name_by_locale
 from barber_bot.i18n import tr
 from barber_bot.services.booking import BookingWindow, format_booking_local, validate_booking_window
 from barber_bot.services.drafts import get_draft, save_draft
+from barber_bot.services.export_xlsx import build_booking_stats_filename, build_booking_stats_workbook_bytes
 from barber_bot.services.phone import normalize_phone
 from barber_bot.services.slots import generate_slots
 
@@ -46,7 +54,8 @@ router = Router(name="admin")
 
 _WEEKDAY_LABELS: dict[str, list[str]] = {
     "ru": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
-    "uz": ["Du", "Se", "Chor", "Pay", "Ju", "Shan", "Yak"],
+    "uz": ["Ду", "Се", "Чор", "Пай", "Жу", "Шан", "Як"],
+    "tj": ["Дш", "Сш", "Чш", "Пш", "Ҷм", "Шн", "Як"],
 }
 
 
@@ -99,6 +108,26 @@ def _format_weekly_rows(locale: str, shifts: list[WorkShift]) -> str:
     return "\n".join(lines)
 
 
+def _parse_weekday_token(value: str) -> int | None:
+    raw = value.strip()
+    try:
+        weekday_number = int(raw)
+    except ValueError:
+        weekday_number = None
+
+    if weekday_number is not None:
+        if weekday_number < 1 or weekday_number > 7:
+            return None
+        return (weekday_number - 1) % 7
+
+    normalized = raw.casefold()
+    for labels in _WEEKDAY_LABELS.values():
+        for weekday, label in enumerate(labels):
+            if normalized == label.casefold():
+                return weekday
+    return None
+
+
 def _parse_weekly_schedule(
     text: str,
 ) -> tuple[dict[int, list[tuple[time, time]]] | None, str | None]:
@@ -113,15 +142,9 @@ def _parse_weekly_schedule(
             return None, "invalid"
 
         day_raw, intervals_raw = parts
-        try:
-            weekday_number = int(day_raw)
-        except ValueError:
+        weekday = _parse_weekday_token(day_raw)
+        if weekday is None:
             return None, "invalid"
-
-        if weekday_number < 1 or weekday_number > 7:
-            return None, "invalid"
-
-        weekday = weekday_number - 1
         if weekday in parsed:
             return None, "invalid"
 
@@ -278,7 +301,10 @@ async def _show_admin_menu(message: Message, locale: str) -> None:
         tr(locale, "admin_menu_title"),
         reply_markup=admin_main_keyboard(locale),
     )
-    await message.answer(_next_step(locale, "next_step_admin_menu"))
+    await message.answer(
+        _next_step(locale, "next_step_admin_menu"),
+        reply_markup=admin_main_reply_keyboard(locale),
+    )
 
 
 def _booking_username(booking: TodayBookingDetailed) -> str:
@@ -290,9 +316,12 @@ def _booking_username(booking: TodayBookingDetailed) -> str:
 
 
 def _booking_service_name(locale: str, booking: TodayBookingDetailed) -> str:
-    if locale == "ru":
-        return booking.service_name_ru or "-"
-    return booking.service_name_uz or "-"
+    return service_name_by_locale(
+        locale,
+        name_ru=booking.service_name_ru,
+        name_uz=booking.service_name_uz,
+        name_tj=booking.service_name_tj,
+    )
 
 
 def _booking_status(locale: str, status: str) -> str:
@@ -375,11 +404,62 @@ def _period_bounds_utc(
     return day_start_local.astimezone(UTC), day_end_local.astimezone(UTC)
 
 
-def _status_counters(bookings: list[TodayBookingDetailed]) -> tuple[int, int, int]:
+def _parse_year_month(raw: str) -> tuple[int, int] | None:
+    try:
+        year_str, month_str = raw.strip().split("-", maxsplit=1)
+        year = int(year_str)
+        month = int(month_str)
+    except (ValueError, AttributeError):
+        return None
+    if year < 1970 or year > 2100:
+        return None
+    if month < 1 or month > 12:
+        return None
+    return year, month
+
+
+def _status_counters(bookings: list[TodayBookingDetailed]) -> tuple[int, int, int, int]:
     confirmed = sum(1 for booking in bookings if booking.status == "confirmed")
+    completed = sum(1 for booking in bookings if booking.status == "completed")
     cancelled = sum(1 for booking in bookings if booking.status == "cancelled")
     blocked = sum(1 for booking in bookings if booking.status == "blocked")
-    return confirmed, cancelled, blocked
+    return confirmed, completed, cancelled, blocked
+
+
+def _format_tjs(amount_minor: int) -> str:
+    return f"{amount_minor / 100:.2f}"
+
+
+async def _load_stats_period_data(
+    *,
+    repo: Repository,
+    container: AppContainer,
+    local_start_day: date,
+    local_end_day_exclusive: date,
+) -> tuple[list[TodayBookingDetailed], str, str, int]:
+    starts_from_utc, starts_to_utc = _period_bounds_utc(
+        tz_name=container.settings.salon_timezone,
+        local_start_day=local_start_day,
+        local_end_day_exclusive=local_end_day_exclusive,
+    )
+    bookings = await repo.list_bookings_detailed_for_range(
+        starts_from_utc=starts_from_utc,
+        starts_to_utc=starts_to_utc,
+        include_statuses=(
+            BookingStatus.CONFIRMED.value,
+            BookingStatus.COMPLETED.value,
+            BookingStatus.BLOCKED.value,
+            BookingStatus.CANCELLED.value,
+        ),
+    )
+    cash_total_minor = await repo.sum_cash_for_range(
+        starts_from_utc=starts_from_utc,
+        starts_to_utc=starts_to_utc,
+        include_statuses=(BookingStatus.COMPLETED.value,),
+    )
+    from_date = local_start_day.strftime("%d.%m.%Y")
+    to_date = (local_end_day_exclusive - timedelta(days=1)).strftime("%d.%m.%Y")
+    return bookings, from_date, to_date, cash_total_minor
 
 
 async def _show_booking_stats_for_period(
@@ -390,30 +470,25 @@ async def _show_booking_stats_for_period(
     locale: str,
     local_start_day: date,
     local_end_day_exclusive: date,
+    export_callback: str,
 ) -> None:
-    starts_from_utc, starts_to_utc = _period_bounds_utc(
-        tz_name=container.settings.salon_timezone,
+    bookings, from_date, to_date, cash_total_minor = await _load_stats_period_data(
+        repo=repo,
+        container=container,
         local_start_day=local_start_day,
         local_end_day_exclusive=local_end_day_exclusive,
     )
-    bookings = await repo.list_bookings_detailed_for_range(
-        starts_from_utc=starts_from_utc,
-        starts_to_utc=starts_to_utc,
-        include_statuses=("confirmed", "blocked", "cancelled"),
-    )
-
-    from_date = local_start_day.strftime("%d.%m.%Y")
-    to_date = (local_end_day_exclusive - timedelta(days=1)).strftime("%d.%m.%Y")
+    result_keyboard = admin_booking_stats_result_keyboard(locale, export_callback)
 
     if not bookings:
         await message.answer(
             tr(locale, "admin_booking_stats_empty", from_date=from_date, to_date=to_date),
-            reply_markup=admin_booking_stats_menu_keyboard(locale),
+            reply_markup=result_keyboard,
         )
         await message.answer(_next_step(locale, "next_step_choose_stats"))
         return
 
-    confirmed, cancelled, blocked = _status_counters(bookings)
+    confirmed, completed, cancelled, blocked = _status_counters(bookings)
     await message.answer(
         tr(
             locale,
@@ -422,10 +497,12 @@ async def _show_booking_stats_for_period(
             to_date=to_date,
             total=len(bookings),
             confirmed=confirmed,
+            completed=completed,
             cancelled=cancelled,
             blocked=blocked,
+            cash_total=_format_tjs(cash_total_minor),
         ),
-        reply_markup=admin_booking_stats_menu_keyboard(locale),
+        reply_markup=result_keyboard,
     )
 
     rows = [
@@ -446,6 +523,225 @@ async def _show_booking_stats_for_period(
     await message.answer(_next_step(locale, "next_step_choose_stats"))
 
 
+async def _send_stats_export_for_period(
+    *,
+    message: Message,
+    repo: Repository,
+    container: AppContainer,
+    locale: str,
+    mode: str,
+    local_start_day: date,
+    local_end_day_exclusive: date,
+) -> None:
+    bookings, from_date, to_date, cash_total_minor = await _load_stats_period_data(
+        repo=repo,
+        container=container,
+        local_start_day=local_start_day,
+        local_end_day_exclusive=local_end_day_exclusive,
+    )
+    confirmed, completed, cancelled, blocked = _status_counters(bookings)
+
+    try:
+        file_bytes = build_booking_stats_workbook_bytes(
+            locale=locale,
+            tz_name=container.settings.salon_timezone,
+            period_from_local=local_start_day,
+            period_to_local=local_end_day_exclusive - timedelta(days=1),
+            total=len(bookings),
+            confirmed=confirmed,
+            completed=completed,
+            cancelled=cancelled,
+            blocked=blocked,
+            cash_total_minor=cash_total_minor,
+            bookings=bookings,
+        )
+    except Exception:
+        await message.answer(tr(locale, "admin_export_failed"))
+        await message.answer(_next_step(locale, "next_step_choose_stats"))
+        return
+
+    now_local = datetime.now(ZoneInfo(container.settings.salon_timezone))
+    filename = build_booking_stats_filename(
+        mode=mode,
+        now_local=now_local,
+        local_day=local_start_day if mode == "date" else None,
+    )
+    input_file = BufferedInputFile(file_bytes, filename=filename)
+    await message.answer_document(
+        input_file,
+        caption=tr(
+            locale,
+            "admin_export_done",
+            from_date=from_date,
+            to_date=to_date,
+            total=len(bookings),
+            cash_total=_format_tjs(cash_total_minor),
+        ),
+    )
+    await message.answer(_next_step(locale, "next_step_choose_stats"))
+
+
+def _visit_label_for_list(
+    *,
+    locale: str,
+    booking: TodayBookingDetailed,
+    tz_name: str,
+) -> str:
+    local_time = booking.starts_at_utc.astimezone(ZoneInfo(tz_name)).strftime("%H:%M")
+    client = _booking_username(booking)
+    if client == "-":
+        client = booking.client_phone_e164 or "-"
+    label = (
+        f"#{booking.booking_id} {local_time} | "
+        f"{_booking_status(locale, booking.status)} | "
+        f"{client}"
+    )
+    if len(label) > 64:
+        return f"{label[:61]}..."
+    return label
+
+
+def _visit_local_day_from_starts(starts_at_utc: datetime, tz_name: str) -> date:
+    return starts_at_utc.astimezone(ZoneInfo(tz_name)).date()
+
+
+def _parse_visit_booking_callback(raw: str, action: str) -> tuple[int, date | None] | None:
+    parts = raw.split(":")
+    if len(parts) not in {4, 5}:
+        return None
+    if parts[:3] != ["admin", "visit", action]:
+        return None
+    try:
+        booking_id = int(parts[3])
+    except ValueError:
+        return None
+    if len(parts) == 4:
+        return booking_id, None
+    try:
+        local_day = date.fromisoformat(parts[4])
+    except ValueError:
+        return None
+    return booking_id, local_day
+
+
+async def _show_visits_today_list(
+    message: Message,
+    repo: Repository,
+    container: AppContainer,
+    locale: str,
+) -> None:
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    await message.answer(
+        tr(locale, "admin_visits_pick_date"),
+        reply_markup=admin_visits_calendar_keyboard(
+            locale,
+            year=today_local.year,
+            month=today_local.month,
+        ),
+    )
+    await message.answer(tr(locale, "admin_visits_enter_date"))
+    await message.answer(_next_step(locale, "next_step_pick_calendar_date"))
+
+
+async def _show_visits_for_local_day(
+    message: Message,
+    repo: Repository,
+    container: AppContainer,
+    locale: str,
+    local_day: date,
+) -> None:
+    starts_from_utc, starts_to_utc = _period_bounds_utc(
+        tz_name=container.settings.salon_timezone,
+        local_start_day=local_day,
+        local_end_day_exclusive=local_day + timedelta(days=1),
+    )
+    bookings = await repo.list_bookings_detailed_for_range(
+        starts_from_utc=starts_from_utc,
+        starts_to_utc=starts_to_utc,
+        include_statuses=(
+            BookingStatus.CONFIRMED.value,
+            BookingStatus.COMPLETED.value,
+            BookingStatus.BLOCKED.value,
+            BookingStatus.CANCELLED.value,
+        ),
+    )
+
+    formatted_day = local_day.strftime("%d.%m.%Y")
+    if not bookings:
+        await message.answer(
+            tr(locale, "admin_visits_empty", date=formatted_day),
+            reply_markup=admin_visits_calendar_keyboard(
+                locale,
+                year=local_day.year,
+                month=local_day.month,
+            ),
+        )
+        await message.answer(_next_step(locale, "next_step_pick_calendar_date"))
+        return
+
+    await message.answer(tr(locale, "admin_visits_title", date=formatted_day))
+    rows = [
+        (
+            booking.booking_id,
+            _visit_label_for_list(
+                locale=locale,
+                booking=booking,
+                tz_name=container.settings.salon_timezone,
+            ),
+        )
+        for booking in bookings
+    ]
+    await message.answer(
+        tr(locale, "admin_visits_choose"),
+        reply_markup=admin_visits_list_keyboard(rows, locale, local_day),
+    )
+    await message.answer(_next_step(locale, "next_step_visit_pick"))
+
+
+async def _show_visit_booking_card(
+    message: Message,
+    repo: Repository,
+    container: AppContainer,
+    locale: str,
+    booking_id: int,
+    local_day: date | None = None,
+) -> bool:
+    booking = await repo.get_booking_detailed(booking_id)
+    if booking is None:
+        await message.answer(tr(locale, "admin_booking_not_found"))
+        return False
+
+    effective_local_day = local_day or _visit_local_day_from_starts(
+        booking.starts_at_utc,
+        container.settings.salon_timezone,
+    )
+
+    start_local = booking.starts_at_utc.astimezone(ZoneInfo(container.settings.salon_timezone)).strftime(
+        "%d.%m %H:%M"
+    )
+    await message.answer(
+        tr(
+            locale,
+            "admin_visit_card",
+            booking_id=booking.booking_id,
+            time=start_local,
+            status=_booking_status(locale, booking.status),
+            barber=booking.barber_name or "-",
+            service=_booking_service_name(locale, booking),
+            username=_booking_username(booking),
+            phone=booking.client_phone_e164 or "-",
+        ),
+        reply_markup=admin_visit_actions_keyboard(
+            booking.booking_id,
+            booking.status,
+            locale,
+            effective_local_day,
+        ),
+    )
+    await message.answer(_next_step(locale, "next_step_visit_action"))
+    return True
+
+
 async def _show_booking_stats_menu(message: Message, locale: str) -> None:
     await message.answer(
         tr(locale, "admin_booking_stats_choose"),
@@ -459,8 +755,23 @@ async def _show_today_bookings(message: Message, repo: Repository, container: Ap
         container.settings.salon_timezone,
         days=container.settings.booking_max_days,
     )
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    today_starts_utc, today_ends_utc = _period_bounds_utc(
+        tz_name=container.settings.salon_timezone,
+        local_start_day=today_local,
+        local_end_day_exclusive=today_local + timedelta(days=1),
+    )
+    today_cash_minor = await repo.sum_cash_for_range(
+        starts_from_utc=today_starts_utc,
+        starts_to_utc=today_ends_utc,
+        include_statuses=(BookingStatus.COMPLETED.value,),
+    )
+    await message.answer(
+        tr(locale, "admin_today_cash_summary", cash_total=_format_tjs(today_cash_minor)),
+        reply_markup=admin_back_menu_keyboard(locale),
+    )
     if not bookings:
-        await message.answer(tr(locale, "admin_today_empty"), reply_markup=admin_back_menu_keyboard(locale))
+        await message.answer(tr(locale, "admin_today_empty"))
         await message.answer(_next_step(locale, "next_step_admin_menu"))
         return
 
@@ -553,7 +864,12 @@ async def _show_service_details(message: Message, repo: Repository, locale: str,
         return False
 
     status_key = "admin_status_active" if service.is_active else "admin_status_inactive"
-    name = service.name_ru if locale == "ru" else service.name_uz
+    name = service_name_by_locale(
+        locale,
+        name_ru=service.name_ru,
+        name_uz=service.name_uz,
+        name_tj=service.name_tj,
+    )
     await message.answer(
         tr(
             locale,
@@ -600,12 +916,16 @@ async def _show_admin_delete_booking_list(
     container: AppContainer,
     locale: str,
 ) -> None:
-    bookings = await repo.list_monitoring_bookings_detailed(
+    bookings_all = await repo.list_monitoring_bookings_detailed(
         container.settings.salon_timezone,
         days=container.settings.booking_max_days,
     )
+    bookings = [b for b in bookings_all if b.status != BookingStatus.COMPLETED.value]
     if not bookings:
-        await message.answer(tr(locale, "admin_list_empty"), reply_markup=admin_back_menu_keyboard(locale))
+        await message.answer(
+            tr(locale, "admin_booking_delete_no_deletable"),
+            reply_markup=admin_back_menu_keyboard(locale),
+        )
         await message.answer(_next_step(locale, "next_step_back_menu"))
         return
 
@@ -663,6 +983,96 @@ async def cmd_admin(
     await state.set_state(AdminStates.menu)
     await state.update_data(admin_edit_barber_id=None, admin_edit_service_id=None)
     await _show_admin_menu(message, locale)
+
+
+@router.message(F.text.in_(admin_menu_texts("bookings_today")))
+async def menu_admin_bookings_today(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_menu(message, locale)
+
+
+@router.message(F.text.in_(admin_menu_texts("visits_today")))
+async def menu_admin_visits_today(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.visit_date_input)
+    await _show_visits_today_list(message, repo, container, locale)
+
+
+@router.message(F.text.in_(admin_menu_texts("booking_add")))
+async def menu_admin_booking_add(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.booking_create_phone)
+    await message.answer(
+        tr(locale, "admin_booking_add_phone"),
+        reply_markup=admin_back_menu_keyboard(locale),
+    )
+    await message.answer(_next_step(locale, "next_step_enter_phone"))
+
+
+@router.message(F.text.in_(admin_menu_texts("booking_delete")))
+async def menu_admin_booking_delete(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.booking_delete_select)
+    await _show_admin_delete_booking_list(message, repo, container, locale)
+
+
+@router.message(F.text.in_(admin_menu_texts("barbers")))
+async def menu_admin_barbers(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.menu)
+    await state.update_data(admin_edit_barber_id=None)
+    await _show_barbers_list(message, repo, locale)
+
+
+@router.message(F.text.in_(admin_menu_texts("services")))
+async def menu_admin_services(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+    await state.set_state(AdminStates.menu)
+    await state.update_data(admin_edit_service_id=None)
+    await _show_services_list(message, repo, locale)
 
 
 @router.callback_query(F.data == "admin:menu")
@@ -734,6 +1144,7 @@ async def cb_admin_booking_stats_horizon(
         locale=locale,
         local_start_day=today_local,
         local_end_day_exclusive=today_local + timedelta(days=container.settings.booking_max_days + 1),
+        export_callback="admin:booking:stats:export:horizon",
     )
     await callback.answer()
 
@@ -758,6 +1169,7 @@ async def cb_admin_booking_stats_week(
         locale=locale,
         local_start_day=today_local,
         local_end_day_exclusive=today_local + timedelta(days=7),
+        export_callback="admin:booking:stats:export:week",
     )
     await callback.answer()
 
@@ -773,12 +1185,17 @@ async def cb_admin_booking_stats_date(
     if not ok or callback.message is None:
         return
 
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
     await state.set_state(AdminStates.booking_stats_date_input)
     await callback.message.answer(
-        tr(locale, "admin_booking_stats_enter_date"),
-        reply_markup=admin_back_menu_keyboard(locale),
+        tr(locale, "admin_booking_stats_pick_date"),
+        reply_markup=admin_booking_stats_calendar_keyboard(
+            locale,
+            year=today_local.year,
+            month=today_local.month,
+        ),
     )
-    await callback.message.answer(_next_step(locale, "next_step_enter_stats_date"))
+    await callback.message.answer(_next_step(locale, "next_step_pick_calendar_date"))
     await callback.answer()
 
 
@@ -810,7 +1227,356 @@ async def on_admin_booking_stats_date_input(
         locale=locale,
         local_start_day=local_day,
         local_end_day_exclusive=local_day + timedelta(days=1),
+        export_callback=f"admin:booking:stats:export:date:{local_day.isoformat()}",
     )
+
+
+@router.callback_query(F.data == "admin:noop")
+async def cb_admin_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:booking:stats:date:month:"))
+async def cb_admin_booking_stats_date_month(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    parsed = _parse_year_month(callback.data.split(":")[-1])
+    if parsed is None:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+    year, month = parsed
+
+    await state.set_state(AdminStates.booking_stats_date_input)
+    await callback.message.edit_text(
+        tr(locale, "admin_booking_stats_pick_date"),
+        reply_markup=admin_booking_stats_calendar_keyboard(
+            locale,
+            year=year,
+            month=month,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:booking:stats:date:pick:"))
+async def cb_admin_booking_stats_date_pick(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    try:
+        local_day = date.fromisoformat(callback.data.split(":")[-1])
+    except ValueError:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+
+    await state.set_state(AdminStates.menu)
+    await _show_booking_stats_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        local_start_day=local_day,
+        local_end_day_exclusive=local_day + timedelta(days=1),
+        export_callback=f"admin:booking:stats:export:date:{local_day.isoformat()}",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:stats:export:horizon")
+async def cb_admin_booking_stats_export_horizon(
+    callback: CallbackQuery,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    await _send_stats_export_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        mode="horizon",
+        local_start_day=today_local,
+        local_end_day_exclusive=today_local + timedelta(days=container.settings.booking_max_days + 1),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:booking:stats:export:week")
+async def cb_admin_booking_stats_export_week(
+    callback: CallbackQuery,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    today_local = datetime.now(ZoneInfo(container.settings.salon_timezone)).date()
+    await _send_stats_export_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        mode="week",
+        local_start_day=today_local,
+        local_end_day_exclusive=today_local + timedelta(days=7),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:booking:stats:export:date:"))
+async def cb_admin_booking_stats_export_date(
+    callback: CallbackQuery,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    try:
+        local_day = date.fromisoformat(callback.data.split(":", maxsplit=5)[-1])
+    except ValueError:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+
+    await _send_stats_export_for_period(
+        message=callback.message,
+        repo=repo,
+        container=container,
+        locale=locale,
+        mode="date",
+        local_start_day=local_day,
+        local_end_day_exclusive=local_day + timedelta(days=1),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.visit_date_input)
+async def on_admin_visit_date_input(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    if message.text is None:
+        return
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+
+    try:
+        local_day = date.fromisoformat(message.text.strip())
+    except ValueError:
+        await message.answer(tr(locale, "admin_visits_invalid_date"))
+        await message.answer(tr(locale, "admin_visits_enter_date"))
+        await message.answer(_next_step(locale, "next_step_pick_calendar_date"))
+        return
+
+    await state.set_state(AdminStates.menu)
+    await _show_visits_for_local_day(message, repo, container, locale, local_day)
+
+
+@router.callback_query(F.data.startswith("admin:visit:date:month:"))
+async def cb_admin_visit_date_month(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    parsed = _parse_year_month(callback.data.split(":")[-1])
+    if parsed is None:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+    year, month = parsed
+
+    await state.set_state(AdminStates.visit_date_input)
+    await callback.message.edit_text(
+        tr(locale, "admin_visits_pick_date"),
+        reply_markup=admin_visits_calendar_keyboard(
+            locale,
+            year=year,
+            month=month,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:visit:list:date:"))
+async def cb_admin_visit_list_date(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    try:
+        local_day = date.fromisoformat(callback.data.split(":")[-1])
+    except ValueError:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+
+    await state.set_state(AdminStates.menu)
+    await _show_visits_for_local_day(callback.message, repo, container, locale, local_day)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:visit:list")
+async def cb_admin_visit_list(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    await state.set_state(AdminStates.visit_date_input)
+    await _show_visits_today_list(callback.message, repo, container, locale)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:visit:pick:"))
+async def cb_admin_visit_pick(
+    callback: CallbackQuery,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None:
+        return
+
+    parsed = _parse_visit_booking_callback(callback.data, "pick")
+    if parsed is None:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+    booking_id, local_day = parsed
+
+    await _show_visit_booking_card(callback.message, repo, container, locale, booking_id, local_day)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:visit:complete:"))
+async def cb_admin_visit_complete(
+    callback: CallbackQuery,
+    repo: Repository,
+    session: AsyncSession,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None or callback.from_user is None:
+        return
+
+    parsed = _parse_visit_booking_callback(callback.data, "complete")
+    if parsed is None:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+    booking_id, local_day = parsed
+
+    booking = await repo.get_booking(booking_id)
+    if booking is None:
+        await callback.message.answer(tr(locale, "admin_booking_not_found"))
+        await callback.answer()
+        return
+    if booking.status != BookingStatus.CONFIRMED.value:
+        await callback.message.answer(tr(locale, "admin_visit_action_not_allowed"))
+        await callback.answer()
+        return
+
+    updated = await repo.set_booking_status(
+        booking_id=booking_id,
+        new_status=BookingStatus.COMPLETED.value,
+        reason="admin_marked_completed",
+        actor_tg_user_id=callback.from_user.id,
+    )
+    if updated is None:
+        await session.rollback()
+        await callback.message.answer(tr(locale, "admin_visit_action_not_allowed"))
+        await callback.answer()
+        return
+
+    await session.commit()
+    await callback.message.answer(tr(locale, "admin_visit_completed"))
+    effective_local_day = local_day or _visit_local_day_from_starts(
+        booking.starts_at_utc,
+        container.settings.salon_timezone,
+    )
+    await _show_visit_booking_card(callback.message, repo, container, locale, booking_id, effective_local_day)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:visit:revert:"))
+async def cb_admin_visit_revert(
+    callback: CallbackQuery,
+    repo: Repository,
+    session: AsyncSession,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin_callback(callback, repo, container)
+    if not ok or callback.message is None or callback.from_user is None:
+        return
+
+    parsed = _parse_visit_booking_callback(callback.data, "revert")
+    if parsed is None:
+        await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+    booking_id, local_day = parsed
+
+    booking = await repo.get_booking(booking_id)
+    if booking is None:
+        await callback.message.answer(tr(locale, "admin_booking_not_found"))
+        await callback.answer()
+        return
+    if booking.status != BookingStatus.COMPLETED.value:
+        await callback.message.answer(tr(locale, "admin_visit_action_not_allowed"))
+        await callback.answer()
+        return
+
+    updated = await repo.set_booking_status(
+        booking_id=booking_id,
+        new_status=BookingStatus.CONFIRMED.value,
+        reason="admin_reverted_completed",
+        actor_tg_user_id=callback.from_user.id,
+    )
+    if updated is None:
+        await session.rollback()
+        await callback.message.answer(tr(locale, "admin_visit_action_not_allowed"))
+        await callback.answer()
+        return
+
+    await session.commit()
+    await callback.message.answer(tr(locale, "admin_visit_reverted"))
+    effective_local_day = local_day or _visit_local_day_from_starts(
+        booking.starts_at_utc,
+        container.settings.salon_timezone,
+    )
+    await _show_visit_booking_card(callback.message, repo, container, locale, booking_id, effective_local_day)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin:booking:add")
@@ -908,7 +1674,7 @@ async def cb_admin_booking_choose_client(
 
     services = await repo.list_active_services()
     if not services:
-        await callback.message.answer("No active services")
+        await callback.message.answer(tr(locale, "no_active_services"))
         await callback.answer()
         return
 
@@ -944,7 +1710,7 @@ async def cb_admin_booking_choose_service(
 
     barbers = await repo.list_active_barbers()
     if not barbers:
-        await callback.answer("No active barbers", show_alert=True)
+        await callback.answer(tr(locale, "no_active_barbers"), show_alert=True)
         return
 
     await state.update_data(admin_booking_service_id=service_id)
@@ -976,7 +1742,7 @@ async def cb_admin_booking_choose_barber(
     data = await state.get_data()
     service_id = data.get("admin_booking_service_id")
     if service_id is None:
-        await callback.answer("Flow expired. Restart /admin", show_alert=True)
+        await callback.answer(tr(locale, "flow_expired_admin"), show_alert=True)
         return
     service = await repo.get_service(int(service_id))
     barber = await repo.get_barber(barber_id)
@@ -1026,7 +1792,7 @@ async def cb_admin_booking_choose_date(
     barber_id = data.get("admin_booking_barber_id")
     service_id = data.get("admin_booking_service_id")
     if barber_id is None or service_id is None:
-        await callback.answer("Flow expired. Restart /admin", show_alert=True)
+        await callback.answer(tr(locale, "flow_expired_admin"), show_alert=True)
         return
     service = await repo.get_service(int(service_id))
     if service is None:
@@ -1095,7 +1861,7 @@ async def cb_admin_booking_choose_slot(
     slot_map = data.get("admin_booking_slot_map") or {}
     slot_data = slot_map.get(slot_id)
     if slot_data is None:
-        await callback.answer("Slot expired", show_alert=True)
+        await callback.answer(tr(locale, "slot_expired_admin"), show_alert=True)
         return
 
     draft_id = uuid4().hex[:12]
@@ -1144,7 +1910,7 @@ async def cb_admin_booking_confirm(
     draft_id = callback.data.split(":")[-1]
     payload = await get_draft(container.redis, draft_id)
     if payload is None:
-        await callback.answer("Draft expired", show_alert=True)
+        await callback.answer(tr(locale, "draft_expired_admin"), show_alert=True)
         return
 
     starts_at_utc = datetime.fromisoformat(payload["starts_at_utc"])
@@ -1154,7 +1920,7 @@ async def cb_admin_booking_confirm(
         max_days=container.settings.booking_max_days,
     )
     if not validate_booking_window(starts_at_utc, datetime.now(UTC), window):
-        await callback.answer("Slot no longer valid", show_alert=True)
+        await callback.answer(tr(locale, "slot_no_longer_valid"), show_alert=True)
         return
 
     booking = await repo.create_confirmed_booking_admin(
@@ -1205,15 +1971,13 @@ async def cb_admin_booking_delete_list(
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("admin:booking:delete:"))
+@router.callback_query(F.data.regexp(r"^admin:booking:delete:\d+$"))
 async def cb_admin_booking_delete_pick(
     callback: CallbackQuery,
     state: FSMContext,
     repo: Repository,
     container: AppContainer,
 ) -> None:
-    if callback.data.startswith("admin:booking:delete:confirm:"):
-        return
     ok, locale = await _check_admin_callback(callback, repo, container)
     if not ok or callback.message is None:
         return
@@ -1221,6 +1985,16 @@ async def cb_admin_booking_delete_pick(
         booking_id = int(callback.data.split(":")[-1])
     except ValueError:
         await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+
+    booking = await repo.get_booking(booking_id)
+    if booking is None:
+        await callback.message.answer(tr(locale, "admin_booking_not_found"))
+        await callback.answer()
+        return
+    if booking.status == BookingStatus.COMPLETED.value:
+        await callback.message.answer(tr(locale, "admin_booking_delete_completed_forbidden"))
+        await callback.answer()
         return
 
     await state.set_state(AdminStates.booking_delete_confirm)
@@ -1249,6 +2023,18 @@ async def cb_admin_booking_delete_confirm(
         booking_id = int(callback.data.split(":")[-1])
     except ValueError:
         await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
+        return
+
+    booking = await repo.get_booking(booking_id)
+    if booking is None:
+        await session.rollback()
+        await callback.message.answer(tr(locale, "admin_booking_not_found"))
+        await callback.answer()
+        return
+    if booking.status == BookingStatus.COMPLETED.value:
+        await session.rollback()
+        await callback.message.answer(tr(locale, "admin_booking_delete_completed_forbidden"))
+        await callback.answer()
         return
 
     deleted = await repo.delete_booking_hard(booking_id)
@@ -1494,14 +2280,12 @@ async def cb_admin_barber_restore(
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("admin:barber:delete:"))
+@router.callback_query(F.data.regexp(r"^admin:barber:delete:\d+$"))
 async def cb_admin_barber_delete(
     callback: CallbackQuery,
     repo: Repository,
     container: AppContainer,
 ) -> None:
-    if callback.data.startswith("admin:barber:delete:confirm:"):
-        return
     ok, locale = await _check_admin_callback(callback, repo, container)
     if not ok or callback.message is None:
         return
@@ -1629,9 +2413,11 @@ async def cb_admin_shift_add(
         await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
         return
 
-    if weekday < 0 or weekday > 6:
+    if weekday < 0 or weekday > 7:
         await callback.answer(tr(locale, "bad_admin_args"), show_alert=True)
         return
+    if weekday == 7:
+        weekday = 6
 
     barber = await repo.get_barber(barber_id)
     if barber is None:
@@ -1814,6 +2600,7 @@ async def cb_admin_service_add(
     await state.update_data(
         admin_service_create_name_ru=None,
         admin_service_create_name_uz=None,
+        admin_service_create_name_tj=None,
         admin_service_create_duration=None,
     )
     await callback.message.answer(
@@ -1874,6 +2661,7 @@ async def cb_admin_service_update(
         admin_edit_service_id=service_id,
         admin_service_edit_name_ru=None,
         admin_service_edit_name_uz=None,
+        admin_service_edit_name_tj=None,
         admin_service_edit_duration=None,
     )
     await callback.message.answer(
@@ -1947,14 +2735,12 @@ async def cb_admin_service_restore(
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("admin:service:delete:"))
+@router.callback_query(F.data.regexp(r"^admin:service:delete:\d+$"))
 async def cb_admin_service_delete(
     callback: CallbackQuery,
     repo: Repository,
     container: AppContainer,
 ) -> None:
-    if callback.data.startswith("admin:service:delete:confirm:"):
-        return
     ok, locale = await _check_admin_callback(callback, repo, container)
     if not ok or callback.message is None:
         return
@@ -2049,6 +2835,30 @@ async def on_admin_service_create_uz_name(
         return
 
     await state.update_data(admin_service_create_name_uz=name_uz)
+    await state.set_state(AdminStates.service_create_tj_name)
+    await message.answer(tr(locale, "admin_enter_service_tj_name"))
+
+
+@router.message(AdminStates.service_create_tj_name)
+async def on_admin_service_create_tj_name(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    if message.text is None:
+        return
+
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+
+    name_tj = message.text.strip()
+    if not name_tj:
+        await message.answer(tr(locale, "admin_enter_service_tj_name"))
+        return
+
+    await state.update_data(admin_service_create_name_tj=name_tj)
     await state.set_state(AdminStates.service_create_duration)
     await message.answer(tr(locale, "admin_enter_service_duration"))
 
@@ -2110,8 +2920,9 @@ async def on_admin_service_create_price(
     data = await state.get_data()
     name_ru = data.get("admin_service_create_name_ru")
     name_uz = data.get("admin_service_create_name_uz")
+    name_tj = data.get("admin_service_create_name_tj")
     duration = data.get("admin_service_create_duration")
-    if not name_ru or not name_uz or duration is None:
+    if not name_ru or not name_uz or not name_tj or duration is None:
         await state.set_state(AdminStates.menu)
         await message.answer(tr(locale, "admin_item_not_found"))
         await _show_services_list(message, repo, locale)
@@ -2122,6 +2933,7 @@ async def on_admin_service_create_price(
         price_minor=price_minor,
         name_ru=str(name_ru),
         name_uz=str(name_uz),
+        name_tj=str(name_tj),
     )
     await session.commit()
 
@@ -2174,6 +2986,30 @@ async def on_admin_service_edit_uz_name(
         return
 
     await state.update_data(admin_service_edit_name_uz=name_uz)
+    await state.set_state(AdminStates.service_edit_tj_name)
+    await message.answer(tr(locale, "admin_enter_service_tj_name"))
+
+
+@router.message(AdminStates.service_edit_tj_name)
+async def on_admin_service_edit_tj_name(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    if message.text is None:
+        return
+
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+
+    name_tj = message.text.strip()
+    if not name_tj:
+        await message.answer(tr(locale, "admin_enter_service_tj_name"))
+        return
+
+    await state.update_data(admin_service_edit_name_tj=name_tj)
     await state.set_state(AdminStates.service_edit_duration)
     await message.answer(tr(locale, "admin_enter_service_duration"))
 
@@ -2236,9 +3072,10 @@ async def on_admin_service_edit_price(
     service_id = data.get("admin_edit_service_id")
     name_ru = data.get("admin_service_edit_name_ru")
     name_uz = data.get("admin_service_edit_name_uz")
+    name_tj = data.get("admin_service_edit_name_tj")
     duration = data.get("admin_service_edit_duration")
 
-    if service_id is None or not name_ru or not name_uz or duration is None:
+    if service_id is None or not name_ru or not name_uz or not name_tj or duration is None:
         await state.set_state(AdminStates.menu)
         await message.answer(tr(locale, "admin_item_not_found"))
         await _show_services_list(message, repo, locale)
@@ -2250,6 +3087,7 @@ async def on_admin_service_edit_price(
         price_minor=price_minor,
         name_ru=str(name_ru),
         name_uz=str(name_uz),
+        name_tj=str(name_tj),
     )
     if not updated:
         await session.rollback()
@@ -2274,6 +3112,21 @@ async def cmd_admin_today(message: Message, repo: Repository, container: AppCont
         return
 
     await _show_today_bookings(message, repo, container, locale)
+
+
+@router.message(Command("admin_visits"))
+async def cmd_admin_visits(
+    message: Message,
+    state: FSMContext,
+    repo: Repository,
+    container: AppContainer,
+) -> None:
+    ok, locale = await _check_admin(message, repo, container)
+    if not ok:
+        return
+
+    await state.set_state(AdminStates.visit_date_input)
+    await _show_visits_today_list(message, repo, container, locale)
 
 
 @router.message(Command("admin_schedule"))
@@ -2305,9 +3158,11 @@ async def cmd_admin_schedule(message: Message, repo: Repository, container: AppC
         f"{start.astimezone(salon_tz).strftime('%H:%M')} - {end.astimezone(salon_tz).strftime('%H:%M')}"
         for start, end in busy
     ]
-    text = (
-        f"Shifts:\n{chr(10).join(shift_rows) if shift_rows else '-'}\n\n"
-        f"Busy:\n{chr(10).join(busy_rows) if busy_rows else '-'}"
+    text = tr(
+        locale,
+        "admin_schedule_overview",
+        shifts=chr(10).join(shift_rows) if shift_rows else "-",
+        busy=chr(10).join(busy_rows) if busy_rows else "-",
     )
     await message.answer(text)
 
@@ -2353,7 +3208,7 @@ async def cmd_admin_block(
     )
     if booking is None:
         await session.rollback()
-        await message.answer("Conflict")
+        await message.answer(tr(locale, "conflict"))
         return
 
     await session.commit()
@@ -2383,16 +3238,24 @@ async def cmd_admin_service_add(
         await message.answer(tr(locale, "bad_admin_args"))
         return
 
-    names = parts[3].split("|", maxsplit=1)
-    if len(names) != 2:
+    names = [part.strip() for part in parts[3].split("|", maxsplit=2)]
+    if len(names) not in {2, 3}:
+        await message.answer(tr(locale, "bad_admin_args"))
+        return
+
+    name_ru = names[0]
+    name_uz = names[1]
+    name_tj = names[2] if len(names) == 3 else name_ru
+    if not name_ru or not name_uz or not name_tj:
         await message.answer(tr(locale, "bad_admin_args"))
         return
 
     await repo.create_service(
         duration_min=duration_min,
         price_minor=price_minor,
-        name_ru=names[0].strip(),
-        name_uz=names[1].strip(),
+        name_ru=name_ru,
+        name_uz=name_uz,
+        name_tj=name_tj,
     )
     await session.commit()
     await message.answer(tr(locale, "admin_done"))
@@ -2428,7 +3291,7 @@ async def cmd_admin_service_toggle(
     updated = await repo.toggle_service(service_id, is_active)
     if not updated:
         await session.rollback()
-        await message.answer("Service not found")
+        await message.answer(tr(locale, "service_not_found"))
         return
 
     await session.commit()
@@ -2465,7 +3328,7 @@ async def cmd_admin_barber_toggle(
     updated = await repo.toggle_barber(barber_id, is_active)
     if not updated:
         await session.rollback()
-        await message.answer("Barber not found")
+        await message.answer(tr(locale, "barber_not_found"))
         return
 
     await session.commit()
