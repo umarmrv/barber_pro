@@ -10,5 +10,7 @@ COPY src ./src
 COPY migrations ./migrations
 
 RUN pip install --no-cache-dir .[dev]
+EXPOSE 8000
+
 
 CMD ["python", "-m", "barber_bot.entrypoints.api_server"]
